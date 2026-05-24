@@ -1,0 +1,196 @@
+AI Trader — Day 1 Summary
+Project: ai-trader — autonomous paper trading bot (Alpaca + PicoClaw)
+Platform: Python 3.10+, Raspberry Pi target (gamer@alarm)
+Day 1 focus: Turn a working trading loop into an observable, operable agent with live visibility and memory
+
+Starting Point (Before Day 1)
+The core trading engine already existed and was running on the Pi:
+
+Alpaca paper execution, risk manager, portfolio tracking
+Multi-stage radar pipeline (~120 stocks + ~40 crypto universe → promote → deep scan)
+Strategies: momentum, mean reversion, volatility
+PicoClaw AI layer (JSON decisions per cycle)
+Hybrid watchlist (pinned symbols + CoinGecko dynamic crypto)
+Rich scroll-print dashboard — one static dump per ~5-minute cycle
+Logging: logs/trades.json, logs/state.json, logs/events.jsonl
+Gap: The bot was trading autonomously but was hard to see, steer, or learn from. No live UI, no operator commands, no AI memory across cycles.
+
+Day 1 Goal: Three Major Priorities
+User-defined roadmap for Day 1:
+
+Interactive Dashboard (highest priority) — live visibility into system state, radar, AI, risk, and a SOC-style timeline
+Agent Interaction Layer — operator commands and runtime control without mutating .env
+AI Memory / Reflection — compressed cross-cycle context injected into prompts
+All three were implemented in a single build pass.
+
+Priority 1: Textual Live Dashboard (“NEURAL TRADER”)
+Replaced the legacy Rich scroll dashboard with a Textual TUI as the default UI (python main.py), keeping --plain for legacy Rich mode over SSH debugging.
+
+Dashboard panels
+Header bar — mode (PAPER/LIVE), cycle count, strategy, market regime, pause state, countdown
+Account — equity, buying power, day P&L
+Positions — open holdings with unrealized P&L
+Pending orders — queued/unfilled orders
+RADAR — top radar hits (score, 1D%, vol, spike flag)
+VOL RANK — deep-scan opportunity ranking
+CRYPTO / STOCKS — split watchlist tables with position/pending tags
+AI DECISION — symbol, action, confidence, reason + memory mood/bias/lesson
+RISK — halt state, day P&L, cooldowns, max position
+Timeline — SOC-style scrolling event feed
+Command bar — natural-language operator input
+Keyboard shortcuts
+Key	Action
+q
+Quit
+p
+Pause / resume cycles
+n
+Force next cycle
+/
+Focus command bar
+r
+Refresh account (no AI call)
+Architecture change
+Extracted run_trading_cycle() → core/cycle_runner.py
+Introduced CycleSnapshot dataclass — single object carrying all UI state per cycle
+Background trading worker runs cycles; UI updates from snapshots
+New modules: core/, ui/dashboard_app.py, ui/formatters.py, ui/plain_dashboard.py, ui/timeline.py
+
+Priority 2: Agent Interaction Layer
+Operator control without editing config files or restarting.
+
+Runtime controller (agent/runtime_controller.py)
+Persists flags to logs/runtime.json:
+
+Global pause / resume
+pause stocks / pause crypto (asset-class scoped)
+force_hold — block new trades
+risk reduced — position size multiplier
+All operator actions logged to events.jsonl
+Runtime flags are checked before AI execution in the cycle runner — trading core stays unchanged.
+
+Command registry (agent/commands.py + agent/validator.py)
+TUI command bar supports:
+
+Command	Purpose
+status
+Runtime + snapshot summary
+explain last
+Last cycle decision breakdown
+hottest
+Top radar hits
+why SYMBOL
+Why a symbol is/isn’t in play
+pause / resume
+Global trading control
+pause stocks / resume stocks
+Stock-only control
+pause crypto / resume crypto
+Crypto-only control
+risk reduced / risk normal
+Scale position sizing
+summarize
+Memory + recent activity recap
+help
+Command list
+New modules: agent/
+
+Priority 3: AI Memory & Reflection
+Stateless PicoClaw calls became context-aware via deterministic reflection (no extra AI call for memory).
+
+Memory store (memory/reflection.py)
+Writes compressed logs/memory.json after each cycle:
+
+ai_mood — healthy / cautious / rate_limited / etc.
+market_bias — bullish / bearish / neutral / cautious
+confidence_bias, recent_win_rate
+best_recent_symbol, worst_recent_symbol
+Rolling last_decisions, lessons, mistakes
+Reflection rules derive from: cycle outcomes, day P&L, AI failure rate in recent events, rejection patterns.
+
+Prompt injection
+ai/prompt_builder.py injects a MEMORY block into every PicoClaw prompt so the AI sees recent behavior without full history bloat.
+
+Dashboard integration
+AI panel shows mood, bias, and latest lesson alongside the current decision.
+
+New modules: memory/
+
+Supporting Infrastructure (Day 1)
+Event buffer (utils/event_buffer.py)
+In-memory ring buffer for live timeline
+Hydrates from events.jsonl tail on startup
+Wired into utils/logger.py so every logged event feeds the TUI
+Timeline formatter (ui/timeline.py)
+Human-readable one-liners for:
+
+cycle_complete, radar_complete, watchlist_built
+rejection, order_submitted, ai_rejected
+memory_updated, operator_command, PicoClaw failures
+Watchlist metadata
+WatchlistBuildResult.radar_hits added for dashboard radar heatmap
+config.py expanded: TUI_ENABLED, TIMELINE_MAX_LINES, RADAR_DISPLAY_TOP_N, RUNTIME_FILE, MEMORY_FILE
+Dependencies
+Added textual>=0.47.0 to requirements.txt
+README updated with TUI docs, commands, and project structure
+Pipeline Architecture (End of Day 1)
+UNIVERSE (~120 stocks + ~40 crypto)
+        ↓  batch bars (5d), scored
+RADAR PROMOTE (top N movers)
+        ↓  batch bars (30d), full indicators
+DEEP SHORTLIST (≤ MAX_DEEP_SCAN, default 20)
+        ↓  strategy signals + compressed prompt (AI_DETAIL_TOP_N full detail)
+PICOCLAW AI DECISION
+        ↓  parse JSON
+RISK ENGINE (hard limits, cooldowns, runtime flags)
+        ↓
+EXECUTOR (Alpaca paper)
+        ↓
+LOGS + MEMORY REFLECTION + CycleSnapshot → Textual TUI
+Design principle established on Day 1: Radar does the math at scale; AI only sees a narrow, ranked shortlist. Never feed 200 symbols to the model.
+
+What Was Running by End of Day 1
+Bot operational on Pi in paper mode (~130+ cycles logged over prior sessions)
+Radar healthy (~124/125 hits typical)
+Crypto fills observed (GRTUSD, TRUMPUSD)
+Stock orders queuing for market open (F, QCOM, MRK, TSLA, AMD)
+PicoClaw rate limits causing ~44% AI failures on OpenRouter free tier
+TSLA HOLD loops when pending stock orders exist
+Day 1 build status: Feature-complete on dev machine; Pi deployment was partial — some modules synced (core/, ui/, agent/, memory/) but not always main.py or latest dashboard fixes. Full Pi polish landed on Day 2.
+
+Known Issues at End of Day 1 (Carried into Day 2)
+Issue	Notes
+Pi showed old Rich dashboard
+Incomplete sync of main.py + Textual dep
+Empty RADAR / regime — on Pi TUI
+Snapshot UI update path broken on Pi
+Timeline duplicate entries on startup
+Event tail + new cycles overlap
+PicoClaw 429 / empty responses
+OpenRouter free tier limit
+Pending stock orders consuming AI cycles
+TSLA HOLD fixation
+RADAR Vol column shows 0.0
+Different field than VOL RANK deep scan
+New Files / Modules (Day 1)
+ai-trader/
+├── core/
+│   └── cycle_runner.py      # CycleSnapshot + run_trading_cycle()
+├── ui/
+│   ├── dashboard_app.py     # Textual TUI (TraderApp)
+│   ├── plain_dashboard.py   # Legacy Rich --plain mode
+│   ├── formatters.py        # Shared table/text formatters
+│   └── timeline.py          # SOC event formatting
+├── agent/
+│   ├── runtime_controller.py
+│   ├── commands.py
+│   └── validator.py
+├── memory/
+│   └── reflection.py
+└── utils/
+    └── event_buffer.py
+One-Line Day 1 Summary
+Day 1 transformed a headless trading loop into a live NEURAL TRADER terminal — Textual dashboard, operator command layer, and deterministic AI memory — establishing the radar-wide / AI-narrow architecture that everything else builds on.
+
+Day 1 → Day 2 Handoff
+Day 2 picked up: Pi deployment fixes, adaptive market composition (weekend crypto-heavy), config scaling (35 deep scan / 80 crypto universe), market-cap crypto ranking, and MAX_PENDING_STOCK_ORDERS=2. See Day 2 Summary for that chapter.
