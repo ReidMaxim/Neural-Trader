@@ -1,0 +1,169 @@
+AI Trader — Day 2 Handoff Summary
+Project: ai-trader on Windows dev → deployed to Raspberry Pi (gamer@alarm:~/ai-trader)
+Mode: Paper trading via Alpaca + PicoClaw (OpenRouter free models)
+Stack: Python, Textual TUI dashboard, ~5-minute scan cycles, momentum strategy
+
+What Day 2 Was About
+Day 1 built the core architecture (TUI, agent commands, memory/reflection, radar pipeline). Day 2 was mostly making it actually work on the Pi, tuning for overnight/weekend crypto, and getting to a demo-ready state (you shipped a TikTok/YouTube overview — nice).
+
+Completed Today
+1. TUI Dashboard Fix (Pi)
+Problem: Account/positions/orders showed data (bootstrap from Alpaca), but RADAR, CRYPTO, STOCKS, regime header stayed — even at cycle 3+. Timeline showed radar events, so cycles were running — snapshots just weren’t applying to the UI.
+
+Root cause: Background worker used call_from_thread(self._apply_snapshot, snap), which didn’t update panels on the Pi.
+
+Fix: Switched to thread-safe post_message(StateUpdated(snap)) (same pattern as TimelineUpdated, which already worked). Removed exclusive=True from the trading worker.
+
+Verified working: Full dashboard with regime (US CLOSED → Mon May 25 09:30 ET), RADAR table, VOL RANK, CRYPTO/STOCKS tables, AI DECISION with mood/bias, hottest command returning radar hits.
+
+2. Pi Deployment / File Sync
+Synced to gamer@alarm:~/ai-trader/ in two waves:
+
+Broad sync: ui/, core/, agent/, memory/, utils/, scanners/, trading/, ai/, main.py, config.py, requirements.txt
+Adaptive tuning sync: config.py, utils/market_hours.py, scanner files, ai/prompt_builder.py, .env.example
+Not synced (intentional): logs/, .env, .venv
+
+Textual 8.2.7 confirmed in Pi venv.
+
+3. Adaptive Market Composition (New Architecture)
+Context-aware radar promotion so the bot isn’t stock-heavy when US market is closed.
+
+Regime	Stock promote	Crypto promote
+US open
+~60% (~11/18)
+~40% (~7/18)
+After hours
+~25% (~4)
+~75% (~14)
+Weekend
+~10% (~2)
+~90% (~16)
+Files: utils/market_hours.py (us_market_regime, radar_promote_quotas), scanners/radar.py (top_radar_symbols_split), scanners/watchlist_builder.py
+
+Config flag: ADAPTIVE_MARKET_COMPOSITION=true (default)
+
+Logging: watchlist_built events now include market_regime, promote_stock_n, promote_crypto_n.
+
+4. Config / Scaling Tuning (“Tonight” Pack)
+New defaults in config.py (apply without .env overrides on Pi):
+
+Setting	Old	New
+CRYPTO_UNIVERSE_MAX
+40
+80
+MAX_DEEP_SCAN / MAX_WATCHLIST_SIZE
+20
+35
+DYNAMIC_CRYPTO_TOP_N
+8
+20
+AI_DETAIL_TOP_N
+8
+12
+RADAR_PROMOTE_N
+12
+18
+MAX_PENDING_STOCK_ORDERS
+0 (unlimited)
+2
+Philosophy: ~200 radar symbols (cheap math), ~35 deep scans (AI focus), 12 full-detail AI candidates — radar scales wide, AI stays narrow.
+
+Pinned watchlist expanded: Added SOLUSD, LINKUSD, DOGEUSD, AVAXUSD (6 stocks + 6 crypto default).
+
+5. Market-Cap Ranked Crypto Universe
+Problem: crypto_universe() used sorted(tradable)[:N] — alphabetical, missing trending/volatile alts.
+
+Fix: Ranks via CoinGecko market cap ∩ Alpaca tradable pool, with fallback to priority list.
+
+File: scanners/universe.py, scanners/providers/coingecko.py
+
+6. Operator / Agent Layer (Already Built, Used Today)
+TUI commands: status, explain last, hottest, pause stocks, pause/resume, help
+Runtime controller → logs/runtime.json (no .env mutation)
+Memory/reflection → logs/memory.json, injected into AI prompts
+Keys: q quit, p pause, n force cycle, r refresh account, / command bar
+Observed Runtime Behavior (End of Day 2)
+Working
+Radar healthy (~122–125 hits per sweep)
+Watchlist bumped from 20 → 35 symbols after restart (~21:20)
+Adaptive config confirmed live on Pi
+Dashboard panels populate correctly
+Memory updates (mood=healthy, bias=cautious)
+Still Painful
+Legacy pending stock orders (5): MRK, QCOM, F, TSLA, AMD queued before MAX_PENDING_STOCK_ORDERS=2. AI keeps revisiting TSLA → HOLD/reject loops. Cap blocks new orders but doesn’t clear old queue.
+PicoClaw / OpenRouter rate limits: ~44% AI failures historically; today saw AI call failed (exit 1), Empty AI response, mood=rate_limited. Free tier = 50 req/day; $10 credits → 1000/day, 20 RPM.
+Timeline noise: Duplicate radar/watchlist lines on startup (tail events.jsonl + new cycles). Cosmetic but cluttered.
+RADAR Vol column shows 0.0 while VOL RANK shows real volatility — likely different fields on RadarHit vs deep scan results.
+Architecture Evolution (Where This Is Heading)
+Natural pipeline emerging:
+
+GLOBAL RADAR (~200 symbols, pure math)
+      ↓
+MARKET REGIME FILTER (open / after-hours / weekend)
+      ↓
+OPPORTUNITY RANKER (35 deep scans)
+      ↓
+AI STRATEGIC LAYER (12 detailed candidates max)
+      ↓
+RISK ENGINE
+      ↓
+EXECUTION
+Future ideas discussed (not built):
+
+Crypto Heat Engine — persistence scoring (momentum, vol, AI attention frequency) so hot assets stay elevated
+Timeline dedupe on startup
+Smarter AI candidate selection — skip symbols with pending orders / deprioritize blocked stocks when pause stocks active
+DexScreener / social velocity hooks (flagged in EXTENSIONS but disabled)
+Key Files Reference
+Area	Path
+Entry
+main.py
+Cycle logic
+core/cycle_runner.py
+TUI
+ui/dashboard_app.py, ui/formatters.py, ui/timeline.py
+Watchlist / radar
+scanners/watchlist_builder.py, scanners/universe.py, scanners/radar.py
+Market regime
+utils/market_hours.py
+Config
+config.py, .env.example
+AI prompts
+ai/prompt_builder.py
+Execution / pending cap
+trading/executor.py
+Operator commands
+agent/commands.py, agent/runtime_controller.py
+Memory
+memory/reflection.py
+Logs
+logs/events.jsonl, logs/state.json, logs/trades.json, logs/memory.json, logs/runtime.json
+Suggested Brainstorm Topics for Tomorrow (Day 3)
+Quick wins
+
+Cancel excess pending stock orders in Alpaca (or auto-cancel on startup when over cap)
+pause stocks as default overnight via runtime flag or schedule
+Timeline dedupe on mount
+Fix RADAR Vol column to use same metric as VOL RANK
+Trading behavior
+
+When US closed: bias AI prompt toward crypto-only candidates (not just watchlist composition)
+Fallback decision when PicoClaw empty (rule-based crypto momentum pick?)
+Reduce duplicate stock promotion in timeline display (show regime + crypto/stock split)
+Infrastructure
+
+OpenRouter funding / PicoClaw retry/backoff strategy
+Pull events.jsonl from Pi for automated daily recap
+Heat engine v0 (rolling score per symbol in logs/heat.json)
+Content / demo
+
+You already have TikTok/YouTube overview — tomorrow could be “overnight crypto run” or “Monday market open” episode
+Dashboard screenshot moments: regime flip at open, first fill, heat map
+Stretch
+
+Discord/obs overlay hooks (EXTENSIONS flags exist)
+Second strategy (ACTIVE_STRATEGY=volatility) A/B comparison
+One-Line Day 2 Summary
+Fixed the live Pi dashboard, deployed adaptive weekend-crypto architecture, scaled radar to ~200 / deep-scan to 35, capped pending stock orders — bot is demo-ready and context-aware, but still fighting legacy stock queue + PicoClaw rate limits overnight.
+
+Good content day. Hand this to the other agent and sleep on whether tomorrow is “clean up overnight trading” or “heat engine + smarter AI fallback.”
